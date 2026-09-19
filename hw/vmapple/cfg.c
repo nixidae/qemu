@@ -12,8 +12,10 @@
 #include "qemu/osdep.h"
 #include "hw/vmapple/vmapple.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/guest-random.h"
 #include "qapi/error.h"
 #include "net/net.h"
 
@@ -53,7 +55,14 @@ typedef struct VMAppleCfg {
     uint8_t unk9[32];         /* 0x3e0 */
     uint32_t unk10;           /* 0x400 */
     char soc_name[32];        /* 0x404 */
+    uint8_t pad_seed[0x24];   /* pad to fixed seed offset */
+    uint8_t seed[64];         /* 0x5c8: guest-visible seed */
 } VMAppleCfg;
+
+QEMU_BUILD_BUG_ON(offsetof(VMAppleCfg, seed) != 0x5c8);
+QEMU_BUILD_BUG_ON(sizeof(((VMAppleCfg *)0)->seed) != 64);
+QEMU_BUILD_BUG_ON(offsetof(VMAppleCfg, seed) +
+                  sizeof(((VMAppleCfg *)0)->seed) != 0x608);
 
 struct VMAppleCfgState {
     SysBusDevice parent_obj;
@@ -63,6 +72,7 @@ struct VMAppleCfgState {
     char *serial;
     char *model;
     char *soc_name;
+    bool production_mode;
 };
 
 static void vmapple_cfg_reset(Object *obj, ResetType type)
@@ -123,7 +133,7 @@ static void vmapple_cfg_realize(DeviceState *dev, Error **errp)
     set_fixlen_property_or_return(s->cfg.soc_name, s->soc_name, errp, "soc_name");
     set_fixlen_property_or_return(s->cfg.unk8, "D/A", errp, "unk8");
     s->cfg.version = 2;
-    s->cfg.unk1 = 1;
+    s->cfg.unk1 = s->production_mode ? 1 : 0;
     s->cfg.unk2 = 1;
     s->cfg.unk3 = 0x20;
     s->cfg.unk4 = 0;
@@ -131,6 +141,8 @@ static void vmapple_cfg_realize(DeviceState *dev, Error **errp)
     s->cfg.unk6 = 1;
     s->cfg.unk7 = 0;
     s->cfg.unk10 = 1;
+    /* Seed once per realize; reset preserves it via s->cfg copy. */
+    qemu_guest_getrandom_nofail(s->cfg.seed, sizeof(s->cfg.seed));
 
     if (s->cfg.nr_cpus > ARRAY_SIZE(s->cfg.cpu_ids)) {
         error_setg(errp,
@@ -166,6 +178,8 @@ static const Property vmapple_cfg_properties[] = {
     DEFINE_PROP_STRING("serial", VMAppleCfgState, serial),
     DEFINE_PROP_STRING("model", VMAppleCfgState, model),
     DEFINE_PROP_STRING("soc_name", VMAppleCfgState, soc_name),
+    DEFINE_PROP_BOOL("production-mode", VMAppleCfgState, production_mode,
+                     true),
 };
 
 static void vmapple_cfg_class_init(ObjectClass *klass, const void *data)

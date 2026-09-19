@@ -19,3 +19,7 @@ aes_dump_data(const char *desc, const char *hex) "%s%s"
 bdif_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
 bdif_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
 bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d"
+bdif_vblk_write(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d"
+bdif_usb_cmd(uint64_t addr, int dma_result) "addr=0x%"PRIx64" dma_result=%d"
+bdif_usb_word(uint32_t offset, uint64_t value) "offset=0x%x value=0x%"PRIx64
+bdif_usb_q0(const char *event, uint64_t daddr, uint32_t dlen, uint32_t flags, uint64_t cur_addr, uint32_t cur_len, uint64_t pend_addr, uint32_t pend_len, uint32_t buffered, uint32_t head_len) "ev=%s daddr=0x%"PRIx64" dlen=0x%x flags=0x%x cur=0x%"PRIx64"/0x%x pend=0x%"PRIx64"/0x%x buf=%u head=%u"

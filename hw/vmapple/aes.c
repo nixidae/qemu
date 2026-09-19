@@ -253,7 +253,13 @@ static bool cmd_iv(AESState *s)
 
 static void dump_data(const char *desc, const void *p, size_t len)
 {
-    static const size_t MAX_LEN = 0x1000;
+    /*
+     * An enum, not a `static const size_t`: the latter makes `hex` a
+     * variable-length array in C, which GCC then refuses to initialize. This
+     * only ever compiled because upstream builds this file with clang on
+     * macOS.
+     */
+    enum { MAX_LEN = 0x1000 };
     char hex[MAX_LEN * 2 + 1] = "";
 
     if (len > MAX_LEN) {

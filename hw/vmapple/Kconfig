@@ -15,7 +15,9 @@ config VMAPPLE_VIRTIO_BLK
 config VMAPPLE
     bool
     depends on ARM
-    depends on HVF
+    # No HVF dependency: this tree runs the machine under TCG on a Linux host,
+    # which is the whole point of it. Upstream gates on HVF because its own
+    # vmapple support assumes a macOS host virtualising Apple silicon natively.
     default y if ARM
     imply PCI_DEVICES
     select ARM_GICV3
@@ -30,5 +32,5 @@ config VMAPPLE
     select VMAPPLE_AES
     select VMAPPLE_BDIF
     select VMAPPLE_CFG
-    select MAC_PVG_MMIO
+    select REIMS_VGPU
     select VMAPPLE_VIRTIO_BLK

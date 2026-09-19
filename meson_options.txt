@@ -485,3 +485,6 @@ option('tcg_tests_cross_cc_xtensaeb', type: 'string',
        description: 'cc for xtensaeb tcg tests')
 option('tcg_tests_cross_cflags_xtensaeb', type: 'string',
        description: 'cflags for xtensaeb tcg tests')
+
+option('reims_vgpu_dir', type: 'string', value: '',
+       description: 'path to the reims-vgpu crate (default: ../reims-vgpu)')

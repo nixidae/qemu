@@ -145,4 +145,41 @@ endif
 
 system_ss.add(when: 'CONFIG_OMAP', if_true: files('omap_lcdc.c'))
 
+
+if config_all_devices.has_key('CONFIG_REIMS_VGPU')
+  # The Rust device lives beside this checkout by default. Override with
+  # `configure --reims-vgpu-dir=/path` (or `meson configure -Dreims_vgpu_dir=`);
+  # this is resolved when the build is configured, not when it runs, so an
+  # environment variable set at `ninja` time would be silently ignored.
+  reims_vgpu_repo_dir = get_option('reims_vgpu_dir')
+  if reims_vgpu_repo_dir == ''
+    reims_vgpu_repo_dir = meson.project_source_root() / '..' / 'reims-vgpu'
+  endif
+  reims_vgpu_abi_header_dir = reims_vgpu_repo_dir / 'crates' / 'reims-vgpu' / 'include'
+  cargo = find_program('cargo')
+  reims_vgpu_rust_sys_libs = ['-lm', '-ldl', '-lpthread']
+  reims_vgpu_cargo_features = '--no-default-features --features backend-vulkan,host-window'
+  reims_vgpu_link_args = reims_vgpu_rust_sys_libs
+  reims_vgpu_built = reims_vgpu_repo_dir / 'target' / 'release' / 'libreims_vgpu.a'
+  reims_vgpu_a = custom_target('reims-vgpu-staticlib',
+    output: 'libreims_vgpu.a',
+    console: true,
+    build_always_stale: true,
+    command: [find_program('sh'), '-c',
+      '"' + cargo.full_path() + '" build --release --manifest-path "' +
+      reims_vgpu_repo_dir + '/Cargo.toml" -p reims-vgpu ' + reims_vgpu_cargo_features +
+      ' && ( cmp -s "' + reims_vgpu_built + '" "@OUTPUT@" || cp "' +
+      reims_vgpu_built + '" "@OUTPUT@" )'])
+  reims_vgpu_header_dep = declare_dependency(
+    compile_args: ['-I' + reims_vgpu_abi_header_dir])
+  reims_vgpu_dep = declare_dependency(
+    link_with: reims_vgpu_a,
+    link_args: reims_vgpu_link_args,
+    compile_args: ['-I' + reims_vgpu_abi_header_dir])
+  system_ss.add(when: 'CONFIG_REIMS_VGPU',
+    if_true: [files('reims-vgpu-dirty.c', 'reims-vgpu-shim.c'), reims_vgpu_header_dep])
+  specific_ss.add(when: 'CONFIG_REIMS_VGPU',
+    if_true: [files('reims-vgpu-mmio.c'), reims_vgpu_dep])
+endif
+
 modules += { 'hw-display': hw_display_modules }
