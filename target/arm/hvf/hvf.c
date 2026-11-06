@@ -35,6 +35,11 @@
 #include "target/arm/cpu.h"
 #include "target/arm/internals.h"
 #include "target/arm/multiprocessing.h"
+#include "target/arm/smccc.h"
+#include "target/arm/emulate-ldst.h"
+
+static bool hvf_ldst_access(uint64_t pa, uint64_t *val, unsigned size,
+                            bool is_write);
 #include "target/arm/gtimer.h"
 #include "target/arm/trace.h"
 #include "trace.h"
@@ -2441,10 +2446,25 @@ static int hvf_handle_exception(CPUState *cpu, hv_vcpu_exit_exception_t *excp)
         assert(!s1ptw);
 
         /*
-         * TODO: ISV will be 0 for SIMD or SVE accesses.
-         * Inject the exception into the guest.
+         * ISV is 0 for a load/store with writeback or a register pair; xnu
+         * uses both on MMIO. Decode the instruction instead.
          */
-        assert(isv);
+        if (!isv) {
+            uint32_t insn = 0;
+
+            cpu_synchronize_state(cpu);
+            if (cpu_memory_rw_debug(cpu, env->pc, &insn, sizeof(insn),
+                                    false) == 0 &&
+                arm_emulate_ldst(env, le32_to_cpu(insn), ipa,
+                                 hvf_ldst_access)) {
+                cpu->vcpu_dirty = true;
+                break;
+            }
+            error_report("hvf: cannot emulate MMIO insn 0x%08x at pc 0x%"
+                         PRIx64 " ipa 0x%" PRIx64, le32_to_cpu(insn),
+                         env->pc, ipa);
+            abort();
+        }
 
         /*
          * Emulate MMIO.
@@ -2498,9 +2518,22 @@ static int hvf_handle_exception(CPUState *cpu, hv_vcpu_exit_exception_t *excp)
         break;
     case EC_AA64_HVC:
         cpu_synchronize_state(cpu);
-        if (arm_cpu->psci_conduit == QEMU_PSCI_CONDUIT_HVC) {
+        if (arm_smccc_dispatch(arm_cpu)) {
+            /* A board service (vmapple's Apple CPU service) answered it. */
+        } else if (arm_cpu->psci_conduit == QEMU_PSCI_CONDUIT_HVC) {
             /* Do NOT advance $pc for HVC */
             if (!hvf_handle_psci_call(cpu, &ret)) {
+                static GHashTable *seen;
+                uint32_t fid = env->xregs[0];
+
+                if (!seen) {
+                    seen = g_hash_table_new(NULL, NULL);
+                }
+                if (g_hash_table_add(seen, GUINT_TO_POINTER(fid))) {
+                    info_report("hvf: unknown HVC 0x%08x at pc 0x%" PRIx64
+                                " x1=0x%" PRIx64 " x2=0x%" PRIx64, fid,
+                                env->pc, env->xregs[1], env->xregs[2]);
+                }
                 trace_hvf_unknown_hvc(env->pc, env->xregs[0]);
                 /* SMCCC 1.3 section 5.2 says every unknown SMCCC call returns -1 */
                 env->xregs[0] = -1;
@@ -2565,6 +2598,63 @@ static int hvf_handle_exception(CPUState *cpu, hv_vcpu_exit_exception_t *excp)
     return ret;
 }
 
+static bool hvf_ldst_access(uint64_t pa, uint64_t *val, unsigned size,
+                            bool is_write)
+{
+    return address_space_rw(&address_space_memory, pa, MEMTXATTRS_UNSPECIFIED,
+                            val, size, is_write) == MEMTX_OK;
+}
+
+#define INSN_HVC0           0xd4000002u
+#define INSN_HVC1           0xd4000022u
+#define INSN_CBNZ_X0_SELF   0xb5000000u
+#define APPLE_CPU_SERVICE   0xc1u
+
+/*
+ * The host kernel answers `hvc #0` with an Apple CPU service function ID
+ * (0xc1......) itself, with 0xffffffff, and never exits to user space;
+ * `hvc #1` with the same ID does exit. macOS 13+ spins on
+ * `movz x0, #fid; hvc #0; cbnz x0, .` after such a call. A vCPU found
+ * there on a kick gets the call served here, and the site becomes `hvc #1`.
+ */
+static void hvf_apple_hvc_fixup(CPUState *cpu)
+{
+    ARMCPU *arm_cpu = ARM_CPU(cpu);
+    CPUARMState *env = &arm_cpu->env;
+    uint32_t insn[3];
+    uint64_t fid;
+    uint32_t hvc1 = cpu_to_le32(INSN_HVC1);
+
+    cpu_synchronize_state(cpu);
+    if (env->xregs[0] != 0xffffffffu || env->pc < 8 ||
+        cpu_memory_rw_debug(cpu, env->pc - 8, insn, sizeof(insn), false)) {
+        return;
+    }
+    insn[0] = le32_to_cpu(insn[0]);
+    insn[1] = le32_to_cpu(insn[1]);
+    insn[2] = le32_to_cpu(insn[2]);
+    if (insn[2] != INSN_CBNZ_X0_SELF ||
+        (insn[1] != INSN_HVC0 && insn[1] != INSN_HVC1) ||
+        (insn[0] & 0xff80001fu) != 0xd2800000u) {   /* movz x0, #imm, lsl #n */
+        return;
+    }
+    fid = (uint64_t)((insn[0] >> 5) & 0xffff) << (16 * ((insn[0] >> 21) & 3));
+    if ((fid >> 24) != APPLE_CPU_SERVICE) {
+        return;
+    }
+    env->xregs[0] = fid;
+    if (!arm_smccc_dispatch(arm_cpu)) {
+        env->xregs[0] = 0xffffffffu;
+        return;
+    }
+    cpu->vcpu_dirty = true;
+    if (insn[1] == INSN_HVC0) {
+        cpu_memory_rw_debug(cpu, env->pc - 4, &hvc1, sizeof(hvc1), true);
+        info_report("hvf: served Apple hypercall 0x%" PRIx64 " at 0x%" PRIx64
+                    ", site now hvc #1", fid, env->pc - 4);
+    }
+}
+
 static int hvf_handle_vmexit(CPUState *cpu, hv_vcpu_exit_t *exit)
 {
     ARMCPU *arm_cpu = env_archcpu(cpu_env(cpu));
@@ -2584,6 +2674,7 @@ static int hvf_handle_vmexit(CPUState *cpu, hv_vcpu_exit_t *exit)
         break;
     case HV_EXIT_REASON_CANCELED:
         /* we got kicked, no exit to process */
+        hvf_apple_hvc_fixup(cpu);
         ret = -1;
         break;
     default:

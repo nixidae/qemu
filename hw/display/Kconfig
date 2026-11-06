@@ -161,4 +161,3 @@ config MAC_PVG_PCI
 
 config REIMS_VGPU
     bool
-    default y

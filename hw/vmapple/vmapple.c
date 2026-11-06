@@ -42,8 +42,8 @@
 #include "hw/vmapple/vmapple.h"
 #include "hw/vmapple/apple_vm_cpu.h"
 #include "hw/vmapple/hvc.h"
+#include "hw/misc/unimp.h"
 #include "target/arm/gtimer.h"
-#include "hw/display/reims-vgpu-shim.h"
 #include "target/arm/arm-powerctl.h"
 #include "net/net.h"
 #include "qapi/error.h"
@@ -305,6 +305,13 @@ static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)
     sysbus_mmio_map(aes, 1, vms->memmap[VMAPPLE_AES_2].base);
     sysbus_connect_irq(aes, 0, qdev_get_gpio_in(vms->gic, irq));
     sysbus_realize_and_unref(aes, &error_fatal);
+
+    /*
+     * Sonoma's iBootStage2 (iBoot-10151) reads 0x30240040. Under TCG an
+     * unmapped read aborts and iBoot panics; HVF reads it as 0.
+     */
+    create_unimplemented_device("vmapple-unknown-30240000", 0x30240000,
+                                0x10000);
 }
 
 static int arm_gic_ppi_index(int cpu_nr, int ppi_index)
@@ -429,8 +436,13 @@ static void create_gpio_devices(const VMAppleMachineState *vms, int gpio,
 
     pl061_dev = qdev_new("pl061");
     /* Pull lines down to 0 if not driven by the PL061 */
-    qdev_prop_set_uint32(pl061_dev, "pullups", 0);
-    qdev_prop_set_uint32(pl061_dev, "pulldowns", 0xff);
+    qdev_prop_set_uint32(pl061_dev, "pullups",
+                         getenv("VMAPPLE_GPIO_PULLUPS") ?
+                         strtoul(getenv("VMAPPLE_GPIO_PULLUPS"), NULL, 0) : 0);
+    qdev_prop_set_uint32(pl061_dev, "pulldowns",
+                         getenv("VMAPPLE_GPIO_PULLUPS") ?
+                         0xff & ~strtoul(getenv("VMAPPLE_GPIO_PULLUPS"), NULL, 0) :
+                         0xff);
     s = SYS_BUS_DEVICE(pl061_dev);
     sysbus_realize_and_unref(s, &error_fatal);
     memory_region_add_subregion(mem, base, sysbus_mmio_get_region(s, 0));

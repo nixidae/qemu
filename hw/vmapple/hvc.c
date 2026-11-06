@@ -41,8 +41,10 @@
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "system/memory.h"
+#include "system/hvf.h"
 #include "system/kvm.h"
 #include "system/tcg.h"
+#include "qemu/timer.h"
 #include "qemu/error-report.h"
 #include "qemu/guest-random.h"
 #include "qemu/units.h"
@@ -165,10 +167,57 @@ static void fix_dt_timebase(ARMCPU *cpu)
                 "tree timebase-frequency record(s) from 24 MHz", hz, patched);
 }
 
+#define INSN_HVC0           0xd4000002u
+#define INSN_HVC1           0xd4000022u
+
+/*
+ * HVF's host kernel answers `hvc #0` with an Apple CPU service ID
+ * (0xc1......) itself and never exits; `hvc #1` exits, and QEMU treats
+ * every HVC immediate alike. The boot CPU's SET_INITIAL_STATE comes before
+ * most of the kernel has run, so every call site is rewritten here once.
+ */
+static void patch_apple_hvc_sites(void)
+{
+    MemoryRegion *ram = current_machine->ram;
+    uint32_t *words = memory_region_get_ram_ptr(ram);
+    size_t n = MIN(memory_region_size(ram), DT_SCAN_BYTES) / 4;
+    size_t i;
+    int total = 0, patched = 0;
+
+    for (i = 1; i + 1 < n; i++) {
+        if (le32_to_cpu(words[i]) != INSN_HVC0) {
+            continue;
+        }
+        total++;
+        /* Callers also load x0 elsewhere and call shared wrappers. */
+        bool patch = true;
+        if (getenv("VMAPPLE_HVC_DUMP") && i >= 6) {
+            info_report("hvc-site pa=0x%" PRIx64 " %s %08x %08x %08x %08x "
+                        "%08x %08x [%08x] %08x %08x",
+                        (uint64_t)0x70000000 + i * 4,
+                        patch ? "patch" : "skip ",
+                        le32_to_cpu(words[i - 6]), le32_to_cpu(words[i - 5]),
+                        le32_to_cpu(words[i - 4]), le32_to_cpu(words[i - 3]),
+                        le32_to_cpu(words[i - 2]), le32_to_cpu(words[i - 1]),
+                        le32_to_cpu(words[i]), le32_to_cpu(words[i + 1]),
+                        le32_to_cpu(words[i + 2]));
+        }
+        if (patch) {
+            words[i] = cpu_to_le32(INSN_HVC1);
+            patched++;
+        }
+    }
+    warn_report("vmapple: rewrote %d of %d `hvc #0` words to `hvc #1`",
+                patched, total);
+}
+
 static void set_initial_state(ARMCPU *cpu)
 {
     if (CPU(cpu) == first_cpu) {
         fix_dt_timebase(cpu);
+        if (hvf_enabled()) {
+            patch_apple_hvc_sites();
+        }
         keys_save(&cpu->env);
     } else if (boot_keys.valid) {
         keys_install(&cpu->env);
@@ -203,11 +252,36 @@ void vmapple_hvc_reset(void)
     } while (!default_pids[0] || !default_pids[1]);
 }
 
+/*
+ * Under HVF a vCPU stuck after a swallowed Apple hypercall spins with
+ * interrupts masked and never exits; target/arm/hvf/hvf.c serves the call
+ * on a kick, and this timer provides the kicks.
+ */
+#define HVF_KICK_MS 10
+
+static QEMUTimer *hvf_kick_timer;
+
+static void hvf_kick_all(void *opaque)
+{
+    CPUState *cs;
+
+    CPU_FOREACH(cs) {
+        qemu_cpu_kick(cs);
+    }
+    timer_mod(hvf_kick_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + HVF_KICK_MS);
+}
+
 void vmapple_hvc_init(void)
 {
     arm_smccc_set_handler(vmapple_hvc);
     if (kvm_enabled()) {
         kvm_arm_smccc_forward(VMAPPLE_CPU_SERVICE_BASE,
                               VMAPPLE_CPU_SERVICE_COUNT);
+    }
+    if (hvf_enabled()) {
+        hvf_kick_timer = timer_new_ms(QEMU_CLOCK_REALTIME, hvf_kick_all, NULL);
+        timer_mod(hvf_kick_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + HVF_KICK_MS);
     }
 }
