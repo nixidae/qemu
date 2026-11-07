@@ -650,6 +650,7 @@ static void mach_vmapple_init(MachineState *machine)
                                 machine->ram);
 
     vmapple_hvc_init();
+    vmapple_hvc_hide_gpu(vms->no_gfx);
 
     create_gic(vms, sysmem);
     create_gicv2m(vms);

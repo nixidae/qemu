@@ -14,4 +14,7 @@ void vmapple_hvc_init(void);
 /* Forget per-boot state; call from the machine reset handler. */
 void vmapple_hvc_reset(void);
 
+/* Hide the paravirtualized GPU from the guest's device tree (gfx=off). */
+void vmapple_hvc_hide_gpu(bool hide);
+
 #endif /* HW_VMAPPLE_HVC_H */

@@ -167,6 +167,42 @@ static void fix_dt_timebase(ARMCPU *cpu)
                 "tree timebase-frequency record(s) from 24 MHz", hz, patched);
 }
 
+/*
+ * Without a GPU device (gfx=off), the guest must not load a GPU driver:
+ * macOS 15's AppleParavirtGPU dereferences NULL on a device that reads 0.
+ * iBoot's device tree always lists the GPU and its IOSurface mapper, so
+ * their "compatible" values get one letter changed and nothing matches.
+ */
+static bool hide_gpu;
+
+void vmapple_hvc_hide_gpu(bool hide)
+{
+    hide_gpu = hide;
+}
+
+static void hide_dt_gpu(void)
+{
+    static const char name[ADT_NAME_LEN] = "compatible";
+    static const char prefix[] = "paravirtualizedgraphics,";
+    MemoryRegion *ram = current_machine->ram;
+    uint8_t *base = memory_region_get_ram_ptr(ram);
+    uint8_t *end = base + MIN(memory_region_size(ram), DT_SCAN_BYTES) -
+                   (ADT_NAME_LEN + 4 + sizeof(prefix));
+    uint8_t *rec, *value;
+    int hidden = 0;
+
+    for (rec = memmem(base, end - base, name, sizeof(name)); rec;
+         rec = memmem(rec + 1, end - rec - 1, name, sizeof(name))) {
+        value = rec + ADT_NAME_LEN + 4;
+        if (!memcmp(value, prefix, sizeof(prefix) - 1)) {
+            value[0] = 'x';
+            hidden++;
+        }
+    }
+    warn_report("vmapple: gfx=off, hid %d paravirtualized graphics device "
+                "tree node(s)", hidden);
+}
+
 #define INSN_HVC0           0xd4000002u
 #define INSN_HVC1           0xd4000022u
 
@@ -215,6 +251,9 @@ static void set_initial_state(ARMCPU *cpu)
 {
     if (CPU(cpu) == first_cpu) {
         fix_dt_timebase(cpu);
+        if (hide_gpu) {
+            hide_dt_gpu();
+        }
         if (hvf_enabled()) {
             patch_apple_hvc_sites();
         }
