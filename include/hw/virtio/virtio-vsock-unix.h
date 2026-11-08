@@ -28,6 +28,7 @@ struct VirtIOVSockUnix {
     char *path;
     int listen_fd;
     uint32_t next_port;
+    QEMUTimer *post_load_timer;
 
     QTAILQ_HEAD(, VSockUnixConn) conns;
     QTAILQ_HEAD(, VSockUnixPkt) ctrl;

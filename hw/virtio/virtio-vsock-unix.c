@@ -22,6 +22,7 @@
 #include "qemu/error-report.h"
 #include "qemu/iov.h"
 #include "qemu/main-loop.h"
+#include "qemu/timer.h"
 #include "qemu/sockets.h"
 #include "qemu/units.h"
 #include "hw/core/qdev-properties.h"
@@ -667,6 +668,10 @@ static void vsock_unrealize(DeviceState *dev)
     VirtIOVSockUnix *s = VIRTIO_VSOCK_UNIX(dev);
 
     vsock_close_all(s);
+    if (s->post_load_timer) {
+        timer_free(s->post_load_timer);
+        s->post_load_timer = NULL;
+    }
     qemu_set_fd_handler(s->listen_fd, NULL, NULL, NULL);
     close(s->listen_fd);
     unlink(s->path);
@@ -676,9 +681,60 @@ static void vsock_unrealize(DeviceState *dev)
     virtio_cleanup(vdev);
 }
 
+/*
+ * Host connections do not survive a migration: the destination starts with
+ * none, and the guest hears a transport reset, which drops its connections
+ * and keeps its listeners (virtio spec 5.10.6.7).
+ */
+static void vsock_send_transport_reset(void *opaque)
+{
+    VirtIOVSockUnix *s = opaque;
+    VirtQueueElement *elem;
+    struct virtio_vsock_event event = {
+        .id = cpu_to_le32(VIRTIO_VSOCK_EVENT_TRANSPORT_RESET),
+    };
+
+    timer_free(s->post_load_timer);
+    s->post_load_timer = NULL;
+    elem = virtqueue_pop(s->event_vq, sizeof(VirtQueueElement));
+    if (!elem) {
+        warn_report("virtio-vsock-unix: no event buffer for the transport "
+                    "reset");
+        return;
+    }
+    if (iov_from_buf(elem->in_sg, elem->in_num, 0, &event, sizeof(event)) !=
+        sizeof(event)) {
+        virtqueue_detach_element(s->event_vq, elem, 0);
+        g_free(elem);
+        return;
+    }
+    virtqueue_push(s->event_vq, elem, sizeof(event));
+    virtio_notify(VIRTIO_DEVICE(s), s->event_vq);
+    g_free(elem);
+}
+
+static int vsock_post_load(void *opaque, int version_id)
+{
+    VirtIOVSockUnix *s = opaque;
+
+    if (virtio_queue_get_addr(VIRTIO_DEVICE(s), 2) && !s->post_load_timer) {
+        /* After the load completes, so the event queue is the loaded one. */
+        s->post_load_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                          vsock_send_transport_reset, s);
+        timer_mod(s->post_load_timer, 1);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_virtio_vsock_unix = {
     .name = "virtio-vsock-unix",
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_VIRTIO_DEVICE,
+        VMSTATE_END_OF_LIST()
+    },
+    .post_load = vsock_post_load,
 };
 
 static const Property vsock_properties[] = {
