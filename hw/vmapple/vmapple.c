@@ -725,7 +725,11 @@ static const CPUArchIdList *vmapple_possible_cpu_arch_ids(MachineState *ms)
 }
 
 static GlobalProperty vmapple_compat_defaults[] = {
-    { TYPE_VIRTIO_PCI, "disable-legacy", "on" },
+    /*
+     * Optional: a modern-only device such as vhost-user-fs-pci has no
+     * disable-legacy property, and a required global refuses it.
+     */
+    { TYPE_VIRTIO_PCI, "disable-legacy", "on", .optional = true },
     /*
      * macOS XHCI driver attempts to schedule events onto even rings 1 & 2
      * even when (as here) there is no MSI(-X) support. Disabling interrupter
