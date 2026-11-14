@@ -1465,6 +1465,16 @@ int vhost_virtqueue_start(struct vhost_dev *dev,
         goto fail;
     }
 
+    /*
+     * Inject a kick in case the back-end only starts vring processing upon
+     * receiving a kick. The spec suggests this to improve compatibility.
+     * Through the notifier, not file.fd: on a host without eventfd that is
+     * the read end of a pipe, and a write to it fails with EBADF.
+     */
+    if (dev->vhost_ops->backend_type == VHOST_BACKEND_TYPE_USER) {
+        event_notifier_set(virtio_queue_get_host_notifier(vvq));
+    }
+
     /* Clear and discard previous events if any. */
     event_notifier_test_and_clear(&vq->masked_notifier);
 
