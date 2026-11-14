@@ -343,7 +343,27 @@ static struct vhost_log *vhost_log_alloc(uint64_t size, bool share)
     int fd = -1;
 
     log = g_new0(struct vhost_log, 1);
-    if (share) {
+    if (share && !qemu_memfd_alloc_check()) {
+        /*
+         * No memfd, as on macOS: the POSIX shared memory that
+         * memory-backend-shm uses. qemu_memfd_free() unmaps and closes it.
+         */
+        fd = qemu_shm_alloc(logsize, &err);
+        if (fd < 0) {
+            error_report_err(err);
+            g_free(log);
+            return NULL;
+        }
+        log->log = mmap(NULL, logsize, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        fd, 0);
+        if (log->log == MAP_FAILED) {
+            error_report("vhost-log: mmap failed: %s", strerror(errno));
+            close(fd);
+            g_free(log);
+            return NULL;
+        }
+        memset(log->log, 0, logsize);
+    } else if (share) {
         log->log = qemu_memfd_alloc("vhost-log", logsize,
                                     F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL,
                                     &fd, &err);
