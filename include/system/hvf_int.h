@@ -50,6 +50,8 @@ struct AccelCPUState {
     bool vtimer_masked;
     bool guest_debug_enabled;
     struct QEMUTimer *wfi_timer;
+    uint64_t aspsr_el1;
+    uint64_t afpcr_el0;
 #endif
 };
 

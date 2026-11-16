@@ -194,6 +194,13 @@ void hvf_arm_init_debug(void)
 #define SYSREG_OSLSR_EL1      SYSREG(2, 0, 1, 1, 4)
 #define SYSREG_OSDLR_EL1      SYSREG(2, 0, 1, 3, 4)
 #define SYSREG_LORC_EL1       SYSREG(3, 0, 10, 4, 3)
+/*
+ * Apple registers (m1n1 apple_regs.json). A macOS guest kernel writes them
+ * while it runs ordinary processes, and public HVF hands the write to us;
+ * unhandled, the guest takes an UNDEF and panics.
+ */
+#define SYSREG_AFPCR_EL0      SYSREG(3, 6, 15, 2, 5)
+#define SYSREG_ASPSR_EL1      SYSREG(3, 6, 15, 8, 3)
 #define SYSREG_CNTPCT_EL0     SYSREG(3, 3, 14, 0, 1)
 #define SYSREG_CNTP_TVAL_EL0   SYSREG(3, 3, 14, 2, 0)
 #define SYSREG_CNTP_CTL_EL0   SYSREG(3, 3, 14, 2, 1)
@@ -1754,6 +1761,12 @@ static int hvf_sysreg_read(CPUState *cpu, uint32_t reg, uint64_t *val)
     case SYSREG_OSDLR_EL1:
         /* Dummy register */
         return 0;
+    case SYSREG_ASPSR_EL1:
+        *val = cpu->accel->aspsr_el1;
+        return 0;
+    case SYSREG_AFPCR_EL0:
+        *val = cpu->accel->afpcr_el0;
+        return 0;
     case SYSREG_CNTHCTL_EL2:
         if (__builtin_available(macOS 15.0, *)) {
             assert_hvf_ok(hv_vcpu_get_sys_reg(cpu->accel->fd, HV_SYS_REG_CNTHCTL_EL2, val));
@@ -2060,6 +2073,12 @@ static int hvf_sysreg_write(CPUState *cpu, uint32_t reg, uint64_t val)
         break;
     case SYSREG_OSDLR_EL1:
         /* Dummy register */
+        return 0;
+    case SYSREG_ASPSR_EL1:
+        cpu->accel->aspsr_el1 = val;
+        return 0;
+    case SYSREG_AFPCR_EL0:
+        cpu->accel->afpcr_el0 = val;
         return 0;
     case SYSREG_CNTHCTL_EL2:
         if (__builtin_available(macOS 15.0, *)) {
