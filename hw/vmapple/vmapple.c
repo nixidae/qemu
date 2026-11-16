@@ -78,6 +78,8 @@ struct VMAppleMachineState {
     /* gfx=off: stub GFX/IOSurface MMIO instead of the GPU (headless). */
     bool no_gfx;
 
+    /* Link each PCI device's capabilities in ascending offset order. */
+    bool pci_caps_ascending;
 
     /* Stub MMIO regions for headless bringup when apple-gfx-mmio is unavailable */
     MemoryRegion dummy_gfx;
@@ -566,6 +568,55 @@ static void vmapple_reset(void *opaque)
     cpu_set_pc(first_cpu, vms->memmap[VMAPPLE_FIRMWARE].base);
 }
 
+/*
+ * pci_add_capability() links a new capability at the head of the list, so
+ * the chain runs from the highest offset down. macOS 27's IOPCIFamily caches
+ * the capabilities and finds the next one of an ID as the first cached entry
+ * above the current offset. On a descending chain that search alternates
+ * between two vendor capabilities, and AppleVirtIOPCITransport::start never
+ * ends. Relinking only the next pointers keeps every capability in place.
+ */
+static void vmapple_sort_pci_caps(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    uint8_t offs[PCI_CONFIG_SPACE_SIZE / PCI_CAP_SIZEOF];
+    unsigned n = 0;
+    uint8_t off;
+
+    if (!(pci_get_word(dev->config + PCI_STATUS) & PCI_STATUS_CAP_LIST)) {
+        return;
+    }
+    for (off = dev->config[PCI_CAPABILITY_LIST]; off && n < ARRAY_SIZE(offs);
+         off = dev->config[off + PCI_CAP_LIST_NEXT]) {
+        unsigned i = n++;
+
+        while (i > 0 && offs[i - 1] > off) {
+            offs[i] = offs[i - 1];
+            i--;
+        }
+        offs[i] = off;
+    }
+    if (off) {
+        warn_report("vmapple: %s: capability list loops; left unchanged",
+                    dev->name);
+        return;
+    }
+    dev->config[PCI_CAPABILITY_LIST] = n ? offs[0] : 0;
+    for (unsigned i = 0; i < n; i++) {
+        dev->config[offs[i] + PCI_CAP_LIST_NEXT] = i + 1 < n ? offs[i + 1] : 0;
+    }
+}
+
+static void vmapple_machine_done(Notifier *notifier, void *data)
+{
+    VMAppleMachineState *vms = container_of(notifier, VMAppleMachineState,
+                                            machine_done);
+
+    if (vms->pci_caps_ascending) {
+        pci_for_each_device(vms->bus, pci_bus_num(vms->bus),
+                            vmapple_sort_pci_caps, NULL);
+    }
+}
+
 static void mach_vmapple_init(MachineState *machine)
 {
     VMAppleMachineState *vms = VMAPPLE_MACHINE(machine);
@@ -683,6 +734,9 @@ static void mach_vmapple_init(MachineState *machine)
     }
 
     qemu_register_reset(vmapple_reset, vms);
+
+    vms->machine_done.notify = vmapple_machine_done;
+    qemu_add_machine_init_done_notifier(&vms->machine_done);
 }
 
 static CpuInstanceProperties
@@ -748,6 +802,17 @@ static void vmapple_set_gfx(Object *obj, bool value, Error **errp)
     VMAPPLE_MACHINE(obj)->no_gfx = !value;
 }
 
+static bool vmapple_get_pci_caps_ascending(Object *obj, Error **errp)
+{
+    return VMAPPLE_MACHINE(obj)->pci_caps_ascending;
+}
+
+static void vmapple_set_pci_caps_ascending(Object *obj, bool value,
+                                           Error **errp)
+{
+    VMAPPLE_MACHINE(obj)->pci_caps_ascending = value;
+}
+
 static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -781,6 +846,12 @@ static void vmapple_instance_init(Object *obj)
     object_property_add_bool(obj, "gfx", vmapple_get_gfx, vmapple_set_gfx);
     object_property_set_description(obj, "gfx",
                                     "Attach the GPU (off: stub MMIO, headless)");
+    object_property_add_bool(obj, "pci-caps-ascending",
+                             vmapple_get_pci_caps_ascending,
+                             vmapple_set_pci_caps_ascending);
+    object_property_set_description(obj, "pci-caps-ascending",
+                                    "Link PCI capabilities in ascending offset "
+                                    "order (needed by macOS 27)");
 
     /*
      * The GIC layout, for accelerators whose in-kernel GIC is placed by
